@@ -12,3 +12,8 @@
   for = "/version.json"
   [headers.values]
     Cache-Control = "no-store, no-cache, must-revalidate"
+
+# Excluir dependencias de terceros del escaneo de secretos.
+# El codigo propio y los archivos publicados siguen siendo analizados.
+[build.environment]
+  SECRETS_SCAN_OMIT_PATHS = "node_modules/**"
