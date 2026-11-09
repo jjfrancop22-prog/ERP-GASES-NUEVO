@@ -6,6 +6,7 @@ service cloud.firestore {
   function active(){return signed() && exists(userPath()) && get(userPath()).data.active == true;}
   function admin(){return active() && get(userPath()).data.role == 'ADMINISTRADOR';}
   function editor(){return active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES'];}
+  function billingAllowed(){return active() && (get(userPath()).data.role == 'ADMINISTRADOR' || (get(userPath()).data.role == 'OPERACIONES' && get(userPath()).data.get('permissions',{}).get('billingAccess',false) == true));}
   function summaryPath(){return /databases/$(database)/documents/summaries/overview;}
   function ready(){return exists(summaryPath()) && get(summaryPath()).data.initialized == true;}
   function summaryIncrement(field,kind,id){
@@ -331,8 +332,8 @@ service cloud.firestore {
    allow delete: if false;
   }
   match /otBilling/{id} {
-   allow read: if active();
-   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+   allow read: if billingAllowed();
+   allow create: if billingAllowed()
     && exists(/databases/$(database)/documents/ots/$(id))
     && get(/databases/$(database)/documents/ots/$(id)).data.status in ['INFORME_PENDIENTE','POR_AUTORIZAR','AUTORIZADO','PUBLICADO','FACTURADO']
     && request.resource.data.otId == id
@@ -343,7 +344,7 @@ service cloud.firestore {
     && request.resource.data.createdAt == request.time
     && request.resource.data.updatedAt == request.time
     && validBilling();
-   allow update: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+   allow update: if billingAllowed()
     && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quote','invoice','invoiceDate','subtotal','state','note','version','updatedBy','updatedAt'])
     && request.resource.data.version == resource.data.version + 1
     && request.resource.data.updatedBy == request.auth.uid
@@ -362,8 +363,8 @@ service cloud.firestore {
     && (!(request.resource.data.state in ['FACTURADO','FACTURA PARCIAL']) || (request.resource.data.invoice.size() > 0 && request.resource.data.invoiceDate.size() == 10));
   }
   match /otBillingAudit/{id} {
-   allow read: if active();
-   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+   allow read: if billingAllowed();
+   allow create: if billingAllowed()
     && request.resource.data.actorId == request.auth.uid
     && request.resource.data.action in ['BILLING_SAVE','BILLING_BATCH']
     && request.resource.data.createdAt == request.time;

@@ -967,8 +967,9 @@ export async function listUserProfiles(){
 export async function saveUserProfile(profile,actorUid){
  if(!/^[A-Za-z0-9_-]{20,128}$/.test(profile.uid))throw new Error('UID inválido. Copie el UID completo de Firebase Authentication.');
  if(!['ADMINISTRADOR','OPERACIONES'].includes(profile.role))throw new Error('Rol no permitido.');
+ if(typeof profile.permissions?.billingAccess!=='boolean')throw new Error('Defina acceso a Facturación.');
  if(!profile.name||!/^\S+@\S+\.\S+$/.test(profile.email))throw new Error('Complete nombre y correo válido.');
  if(profile.uid===actorUid&&(!profile.active||profile.role!=='ADMINISTRADOR'))throw new Error('No puede retirar su propio acceso administrativo.');
  const ref=doc(db,'users',profile.uid);const old=await getDoc(ref);
- await setDoc(ref,{name:profile.name,email:profile.email,role:profile.role,active:profile.active,updatedAt:serverTimestamp(),updatedBy:actorUid,...(!old.exists()?{createdAt:serverTimestamp(),createdBy:actorUid}:{})},{merge:true});
+ await setDoc(ref,{name:profile.name,email:profile.email,role:profile.role,active:profile.active,permissions:{billingAccess:profile.role==='ADMINISTRADOR'||profile.permissions.billingAccess===true},updatedAt:serverTimestamp(),updatedBy:actorUid,...(!old.exists()?{createdAt:serverTimestamp(),createdBy:actorUid}:{})},{merge:true});
 }
