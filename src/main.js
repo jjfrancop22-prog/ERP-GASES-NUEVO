@@ -9,7 +9,7 @@ import {db} from './firebase.js';
 import {profile,page,createOT,addClient,updateClient,updateOT,saveOTControlled,correctOTHistoricalDetails,correctOTWorkDate,correctPendingReceptionDate,voidOT,sendLaboratoryOT,sendLaboratoryBatch,receiveLaboratory,receiveLaboratoryBatch,returnPendingOTs,deliverReport,deliverReportsBatch,returnReportToPending,returnAuthorizedToAuthorization,authorizeReport,authorizeReportsBatch,publishPortalOT,publishPortalBatch,fetchBillingPage,searchBillingGlobal,exportBillingHistory,fetchAdmittedPage,searchSupervisionGlobal,saveBilling,saveBillingBatch,fetchOT,count,supervisionCounts,watchPage,watchCounters,countOTStage,countMeasurementOTs,operationMenuCounts,verifyServer,initializeCounters,checkCounterConsistency,searchClients,clientCatalogPage,addBranch,importCatalogClient,lookupCatalogName,searchMonitorings,saveMonitoring,listMonitorings,exportAllMonitorings,nextOTSequence,scanOTHistory,searchOTIndexedPrefixes,searchOTIndexOperational,searchLaboratoryStage,findOTByExactCode,listRegistrationResponsibles,addRegistrationResponsible,listUserProfiles,saveUserProfile} from './data.js';
 const $=s=>document.querySelector(s);const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sections=[['dashboard','▦','Centro de control'],['trace','⌕','Consulta y trazabilidad'],['ots','◈','Mediciones ambientales'],['laboratory','⚗','Ingreso de laboratorio'],['billing','▣','Facturación'],['supervision','◉','Supervisión de informes'],['clients','♧','Clientes'],['monitorings','◫','Catálogo de monitoreos'],['users','♙','Usuarios y permisos'],['migration','⇧','Importación histórica'],['diagnostics','◉','Diagnóstico Firebase']];
-const APP_VERSION='V1.0.1.35';
+const APP_VERSION='V1.0.1.39';
 // Resolución visual por ID: NO escribe en las OT ni altera sus nombres históricos.
 // Una lectura por cliente distinto (máximo 15 min en memoria); sin listeners adicionales.
 const catalogNameCache=new Map();
@@ -40,6 +40,7 @@ let menuCountTimer=null,menuCountBusy=false,menuCountGeneration=0,menuCountLastA
 let menuCountValues=null,menuCountPromise=null,menuCountQueued=false;
 const MENU_CACHE_KEY='psi-gases-menu-counts-v68';
 let menuSummaryStop=null;
+let lastObservedOTTotal=null,menuSummaryRefreshTimer=null;
 try{const saved=JSON.parse(localStorage.getItem(MENU_CACHE_KEY)||'null')||JSON.parse(sessionStorage.getItem('psi-gases-menu-counts-v66')||'null');if(saved&&saved.values&&Number.isFinite(saved.at)){menuCountValues=saved.values;menuCountLastAt=saved.at}}catch{}
 function paintMenuCounts(){
  if(!menuCountValues)return;
@@ -70,8 +71,16 @@ function startMenuCounts(){
  menuCountGeneration++;paintMenuCounts();refreshMenuCounts();
  // ÚNICA suscripción compartida al resumen ya transaccional (OT y clientes).
  // No se crean listeners por pestaña ni por filtro.
- if(!menuSummaryStop)menuSummaryStop=watchCounters(({ready,counts})=>{
+ if(!menuSummaryStop)menuSummaryStop=watchCounters(({ready,counts,fromCache,pending})=>{
   if(!ready||!Number.isFinite(counts?.ots))return;
+  // Una nueva OT en otra computadora modifica el resumen transaccional.
+  // Recalcular bandejas solo ante ese cambio, nunca mediante sondeo periódico.
+  const previousTotal=lastObservedOTTotal;
+  lastObservedOTTotal=counts.ots;
+  if(previousTotal!==null&&previousTotal!==counts.ots&&!fromCache&&!pending){
+   clearTimeout(menuSummaryRefreshTimer);
+   menuSummaryRefreshTimer=setTimeout(()=>{menuSummaryRefreshTimer=null;refreshMenuCounts(true)},800);
+  }
   menuCountValues={...(menuCountValues||{}),ots:counts.ots};
   try{localStorage.setItem(MENU_CACHE_KEY,JSON.stringify({values:menuCountValues,at:menuCountLastAt}))}catch{}
   paintMenuCounts();
@@ -81,7 +90,7 @@ function startMenuCounts(){
   }
  },err=>console.warn('Resumen central no disponible',err));
 }
-function stopMenuCounts(){menuCountGeneration++;if(menuCountTimer)clearInterval(menuCountTimer);menuCountTimer=null;if(menuSummaryStop){menuSummaryStop();menuSummaryStop=null}}
+function stopMenuCounts(){lastObservedOTTotal=null;clearTimeout(menuSummaryRefreshTimer);menuSummaryRefreshTimer=null;menuCountGeneration++;if(menuCountTimer)clearInterval(menuCountTimer);menuCountTimer=null;if(menuSummaryStop){menuSummaryStop();menuSummaryStop=null}}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshMenuCounts();if(state.view==='laboratory')refreshLaboratoryStageCounts(true)}});
 window.addEventListener('online',()=>{if(state.view==='laboratory')setTimeout(()=>refreshLaboratoryStageCounts(true),1400);setTimeout(()=>refreshMenuCounts(),1200);setTimeout(()=>retryPendingOTIndexes().catch(console.warn),2500)});
 function stopWatch(){state.watchGeneration++;if(state.watchStop){state.watchStop();state.watchStop=null}state.watchView=null}
@@ -659,7 +668,7 @@ function paintRows(view){
  target.querySelectorAll('[data-report-select]').forEach(b=>b.onchange=()=>{const ot=(state.rows.laboratory||[]).find(x=>x.id===b.dataset.reportSelect);if(b.checked&&ot)state.selectedReportOTs.set(ot.id,ot.code);else state.selectedReportOTs.delete(b.dataset.reportSelect);$('#report-selected-count').textContent=state.selectedReportOTs.size+' seleccionadas'});
  return;
  }
- target.innerHTML=rows.length?rows.map(r=>view==='ots'?`<tr><td><input type="checkbox" data-select-ot="${escape(r.id)}" ${state.selectedOTs.has(r.id)?'checked':''} aria-label="Seleccionar ${escape(r.code)}"></td><td><b>${escape(r.code||'—')}</b><small class="ot-cell-secondary">${escape(r.status==='EN_LABORATORIO'?'OT ingresada':r.status==='PROGRAMADA'?'OT programada':'OT registrada')}</small></td><td><b>${escape(r.clientName||'—')}</b><small class="ot-cell-secondary">${escape(r.branchName||'—')}</small></td><td>${escape(r.monitoring||'—')}</td><td>${escape(r.type||'—')}</td><td>${escape(r.points??'—')}</td><td>${escape(r.workDate||'Pendiente')}</td><td><div class="ot-row-actions"><button class="btn alt" data-edit-ot="${escape(r.id)}">Editar</button><button class="btn" data-send-ot="${escape(r.id)}">Enviar a laboratorio</button>${r.status!=='EN_LABORATORIO'&&isAdmin()?`<button class="btn danger" data-void-ot="${escape(r.id)}">Eliminar</button>`:''}</div></td></tr>`:`<tr><td><b>${escape(r.code||r.otCode||r.id.slice(0,8))}</b></td><td>${escape(r.clientName||r.client||'—')}</td><td>${escape(r.type||r.monitoringType||'—')}</td><td><span class="tag">${escape(r.status)}</span></td><td>${escape(r.sampledAt||'Pendiente')}</td><td><span class="tag">${escape(r.laboratory?.analyst||'OT ingresada')}</span></td></tr>`).join(''):`<tr><td colspan="${view==='ots'?8:6}" class="empty">No hay registros en esta página.</td></tr>`;
+ target.innerHTML=rows.length?rows.map(r=>view==='ots'?`<tr><td><input type="checkbox" data-select-ot="${escape(r.id)}" ${state.selectedOTs.has(r.id)?'checked':''} aria-label="Seleccionar ${escape(r.code)}"></td><td><b>${escape(r.code||'—')}</b><small class="ot-cell-secondary">${escape(r.status==='EN_LABORATORIO'?'OT ingresada':r.status==='PROGRAMADA'?'OT programada':'OT registrada')}</small></td><td><b>${escape(r.clientName||'—')}</b><small class="ot-cell-secondary">${escape(r.branchName||'—')}</small></td><td>${escape(r.monitoring||'—')}</td><td>${escape(String(r.type||'—').toUpperCase())}</td><td>${escape(r.points??'—')}</td><td>${escape(r.workDate||'Pendiente')}</td><td><div class="ot-row-actions"><button class="btn alt" data-edit-ot="${escape(r.id)}">Editar</button><button class="btn" data-send-ot="${escape(r.id)}">Enviar a laboratorio</button>${r.status!=='EN_LABORATORIO'&&isAdmin()?`<button class="btn danger" data-void-ot="${escape(r.id)}">Eliminar</button>`:''}</div></td></tr>`:`<tr><td><b>${escape(r.code||r.otCode||r.id.slice(0,8))}</b></td><td>${escape(r.clientName||r.client||'—')}</td><td>${escape(r.type||r.monitoringType||'—')}</td><td><span class="tag">${escape(r.status)}</span></td><td>${escape(r.sampledAt||'Pendiente')}</td><td><span class="tag">${escape(r.laboratory?.analyst||'OT ingresada')}</span></td></tr>`).join(''):`<tr><td colspan="${view==='ots'?8:6}" class="empty">No hay registros en esta página.</td></tr>`;
  if(view==='ots'){
   const count=$('#ot-selected-count');if(count)count.textContent=state.selectedOTs.size+' seleccionadas';target.querySelectorAll('[data-select-ot]').forEach(b=>b.onchange=()=>{const ot=(state.rows.ots||[]).find(r=>r.id===b.dataset.selectOt);if(b.checked&&ot)state.selectedOTs.set(ot.id,ot.code);else state.selectedOTs.delete(b.dataset.selectOt);const c=$('#ot-selected-count');if(c)c.textContent=state.selectedOTs.size+' seleccionadas'});target.querySelectorAll('[data-send-ot]').forEach(b=>b.onclick=()=>openIndividualSend(b.dataset.sendOt));
   target.querySelectorAll('[data-edit-ot]').forEach(b=>b.onclick=()=>editOT(b.dataset.editOt));
@@ -1149,10 +1158,13 @@ async function editOT(id){
   // Consultar cliente original solo cuando sea necesario para validar la sucursal existente.
   if(client.id){try{const rows=await searchClients(client.name,10);const found=rows.find(x=>x.id===client.id);if(found)client=found}catch{}}
   f.onsubmit=async e=>{e.preventDefault();const btn=f.querySelector('[type="submit"]'),feedback=f.querySelector('#edit-feedback');try{
-   if(!monitoring||monitoring.series!==originalSeries||norm(monitoring.name)!==norm(f.elements.monitoring.value))throw Error('Seleccione un monitoreo del catálogo '+originalSeries+'.');
-   if(!client?.id||norm(client.name)!==norm(f.elements.clientName.value))throw Error('Seleccione un cliente del catálogo.');
-   if(!branchId||!(client.branches||[]).some(x=>x.id===branchId&&x.active!==false&&norm(x.name)===norm(f.elements.branchName.value)))throw Error('Seleccione una sucursal válida.');
-   const patch={monitoring:monitoring.name,monitoringId:monitoring.id,type:monitoring.type,clientName:client.name,clientId:client.id,branchName:client.branches.find(x=>x.id===branchId).name,branchId,points:Number(f.elements.points.value),workDate:f.elements.workDate.value,registeredBy:f.elements.registeredBy.value,observations:f.elements.observations.value};
+   if((norm(f.elements.monitoring.value)!==norm(ot.monitoring||''))&&(!monitoring||monitoring.series!==originalSeries||norm(monitoring.name)!==norm(f.elements.monitoring.value)))throw Error('Seleccione un monitoreo del catálogo '+originalSeries+'.');
+   const clientChanged=norm(f.elements.clientName.value)!==norm(ot.clientName||'') || (client?.id&&client.id!==ot.clientId);
+   if(clientChanged&&(!client?.id||norm(client.name)!==norm(f.elements.clientName.value)))throw Error('Seleccione un cliente del catálogo.');
+   const branchChanged=clientChanged||norm(f.elements.branchName.value)!==norm(ot.branchName||'')||branchId!==ot.branchId;
+   if(branchChanged&&(!branchId||!(client?.branches||[]).some(x=>x.id===branchId&&x.active!==false&&norm(x.name)===norm(f.elements.branchName.value))))throw Error('Seleccione una sucursal válida.');
+   const monitorChanged=norm(f.elements.monitoring.value)!==norm(ot.monitoring||'')||(monitoring?.id&&monitoring.id!==ot.monitoringId);
+   const patch={monitoring:monitorChanged?monitoring.name:ot.monitoring,monitoringId:monitorChanged?monitoring.id:ot.monitoringId,type:monitorChanged?monitoring.type:ot.type,clientName:clientChanged?client.name:ot.clientName,clientId:clientChanged?client.id:ot.clientId,branchName:branchChanged?client.branches.find(x=>x.id===branchId).name:ot.branchName,branchId:branchChanged?branchId:ot.branchId,points:Number(f.elements.points.value),workDate:f.elements.workDate.value,registeredBy:f.elements.registeredBy.value,observations:f.elements.observations.value};
    const reason=prompt('Motivo de la edición controlada (10 a 500 caracteres):');if(reason===null)return;
    btn.disabled=true;feedback.textContent='Guardando cambios con auditoría…';
    await saveOTControlled(id,ot.version,patch,reason,state.user);close();toast('OT '+ot.code+' actualizada y auditada.');if(state.view==='ots')document.querySelector('#refresh')?.click();

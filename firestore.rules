@@ -140,6 +140,32 @@ service cloud.firestore {
         && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
         && request.resource.data.followUp == (request.resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA'))
        ||
+       // V1.0.1.38: edición controlada con datos históricos sin reescritura.
+       // Los valores históricos de tipo/monitoreo se conservan si no se modifican.
+       (editor()
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.series == resource.data.series
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['monitoring','monitoringId','type','clientId','clientName','branchId','branchName','points','workDate','registeredBy','observations','status','followUp','version','updatedAt','updatedBy'])
+        && request.resource.data.points is int && request.resource.data.points >= 1 && request.resource.data.points <= 100
+        && request.resource.data.observations is string && request.resource.data.observations.size() <= 1500
+        && request.resource.data.workDate is string && (request.resource.data.workDate.size() == 0 || request.resource.data.workDate.size() == 10)
+        && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+        && request.resource.data.followUp == (request.resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA')
+        && ((request.resource.data.monitoringId == resource.data.monitoringId
+             && request.resource.data.monitoring == resource.data.monitoring
+             && request.resource.data.type == resource.data.type)
+            || (exists(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId))
+                && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.active != false
+                && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.series == resource.data.series
+                && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.name == request.resource.data.monitoring
+                && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.type == request.resource.data.type))
+        && ((request.resource.data.clientId == resource.data.clientId
+             && request.resource.data.clientName == resource.data.clientName)
+            || (exists(/databases/$(database)/documents/clients/$(request.resource.data.clientId))
+                && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.active != false
+                && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.name == request.resource.data.clientName))
+       )
+       ||
        // V1.0.0.59: edición única con monitoreo RG/RR, cliente, fecha y auditoría.
        (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
         && resource.data.status in ['REGISTRADA','PROGRAMADA']

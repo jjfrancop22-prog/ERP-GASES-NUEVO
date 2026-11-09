@@ -148,19 +148,35 @@ export async function saveOTControlled(id,expectedVersion,patch,reason,user){
  if(String(patch.observations||'').length>1500)throw Error('Observaciones demasiado extensas.');
  if(patch.workDate&&!/^\d{4}-\d{2}-\d{2}$/.test(patch.workDate))throw Error('Fecha inválida.');
  await runTransaction(db,async t=>{
-  const ref=doc(db,'ots',id),mr=doc(db,'monitoringCatalog',patch.monitoringId),cr=doc(db,'clients',patch.clientId);
-  const [snap,ms,cs]=await Promise.all([t.get(ref),t.get(mr),t.get(cr)]);
+  const ref=doc(db,'ots',id);
+  const snap=await t.get(ref);
   if(!snap.exists())throw Error('OT no encontrada.');const old=snap.data();
   if(old.version!==expectedVersion)throw Error('La OT fue modificada desde otra computadora. Actualice la vista.');
   if(!['REGISTRADA','PROGRAMADA'].includes(old.status))throw Error('Solo se pueden editar OT que no estén enviadas al laboratorio.');
-  const series=old.series||String(old.code||'').slice(0,2),m=ms.data(),c=cs.data();
-  if(!['RG','RR'].includes(series)||!ms.exists()||m.active===false||m.series!==series||m.name!==patch.monitoring||m.type!==patch.type)throw Error('Seleccione un monitoreo activo de la identificación '+series+'.');
-  if(!cs.exists()||c.active===false||c.name!==patch.clientName||!(c.branches||[]).some(b=>b.id===patch.branchId&&b.name===patch.branchName&&b.active!==false))throw Error('Cliente o sucursal no válidos.');
-  const changes={};for(const k of ['monitoring','monitoringId','type','clientId','clientName','branchId','branchName','points','workDate','registeredBy','observations'])if((old[k]??'')!==(patch[k]??''))changes[k]={before:old[k]??null,after:patch[k]??null};
+  const series=old.series||String(old.code||'').slice(0,2);
+  const monitoringChanged=old.monitoringId!==patch.monitoringId||old.monitoring!==patch.monitoring||old.type!==patch.type;
+  const clientChanged=old.clientId!==patch.clientId||old.clientName!==patch.clientName;
+  const branchChanged=clientChanged||old.branchId!==patch.branchId||old.branchName!==patch.branchName;
+  // Solo consultar los catálogos que realmente se modifican.
+  const mr=monitoringChanged?doc(db,'monitoringCatalog',patch.monitoringId):null;
+  const cr=branchChanged?doc(db,'clients',patch.clientId):null;
+  const ms=mr?await t.get(mr):null;
+  const cs=cr?await t.get(cr):null;
+  if(monitoringChanged){const m=ms?.data();if(!['RG','RR'].includes(series)||!ms.exists()||m.active===false||m.series!==series||m.name!==patch.monitoring||m.type!==patch.type)throw Error('Seleccione un monitoreo activo de la identificación '+series+'.');}
+  if(branchChanged){const c=cs?.data();if(!cs.exists()||c.active===false||c.name!==patch.clientName||!(c.branches||[]).some(b=>b.id===patch.branchId&&b.name===patch.branchName&&b.active!==false))throw Error('Cliente o sucursal no válidos.');}
+  // Conservar valores históricos intactos; normalizar solo cuando se selecciona
+  // realmente un monitoreo nuevo. No reescribir campos sin cambios.
+  const fields=['monitoring','monitoringId','type','clientId','clientName','branchId','branchName','points','workDate','registeredBy','observations'];
+  if(!monitoringChanged && String(old.type||'').toUpperCase()===String(patch.type||'').toUpperCase())patch={...patch,type:old.type};
+  const changes={},delta={};
+  for(const k of fields)if((old[k]??'')!==(patch[k]??'')){
+   changes[k]={before:old[k]??null,after:patch[k]??null};delta[k]=patch[k];
+  }
   if(!Object.keys(changes).length)throw Error('No hay cambios para guardar.');
   if(String(reason||'').trim().length<10||String(reason||'').trim().length>500)throw Error('Ingrese un motivo entre 10 y 500 caracteres.');
-  const status=patch.workDate?'PROGRAMADA':'REGISTRADA';
-  t.update(ref,{...patch,status,followUp:patch.workDate?'OT_PROGRAMADA':'OT_POR_PROGRAMAR',version:old.version+1,updatedAt:serverTimestamp(),updatedBy:user.uid});
+  const finalDate=('workDate' in delta)?delta.workDate:old.workDate;
+  const status=finalDate?'PROGRAMADA':'REGISTRADA';
+  t.update(ref,{...delta,status,followUp:finalDate?'OT_PROGRAMADA':'OT_POR_PROGRAMAR',version:old.version+1,updatedAt:serverTimestamp(),updatedBy:user.uid});
   t.set(doc(collection(db,'otLaboratoryAudit')),{otId:id,code:old.code,action:'EDICION_CONTROLADA_OT',changes,reason:String(reason).trim(),actorId:user.uid,createdAt:serverTimestamp()});
  });
 }
