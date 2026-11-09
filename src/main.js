@@ -4,12 +4,32 @@ import {testOTSearchIndex,buildSearchIndex,retryPendingOTIndexes} from './data.j
 import './style.css';
 import {auth} from './firebase.js';
 import {onAuthStateChanged,signInWithEmailAndPassword,signOut} from 'firebase/auth';
-import {doc,onSnapshot,collection,query,orderBy,limit,addDoc,serverTimestamp,Timestamp} from 'firebase/firestore';
+import {doc,onSnapshot,collection,query,orderBy,limit,addDoc,serverTimestamp,Timestamp,getDoc} from 'firebase/firestore';
 import {db} from './firebase.js';
 import {profile,page,createOT,addClient,updateClient,updateOT,saveOTControlled,correctOTHistoricalDetails,correctOTWorkDate,correctPendingReceptionDate,voidOT,sendLaboratoryOT,sendLaboratoryBatch,receiveLaboratory,receiveLaboratoryBatch,returnPendingOTs,deliverReport,deliverReportsBatch,returnReportToPending,returnAuthorizedToAuthorization,authorizeReport,authorizeReportsBatch,publishPortalOT,publishPortalBatch,fetchBillingPage,searchBillingGlobal,exportBillingHistory,fetchAdmittedPage,searchSupervisionGlobal,saveBilling,saveBillingBatch,fetchOT,count,supervisionCounts,watchPage,watchCounters,countOTStage,countMeasurementOTs,operationMenuCounts,verifyServer,initializeCounters,checkCounterConsistency,searchClients,clientCatalogPage,addBranch,importCatalogClient,lookupCatalogName,searchMonitorings,saveMonitoring,listMonitorings,exportAllMonitorings,nextOTSequence,scanOTHistory,searchOTIndexedPrefixes,searchOTIndexOperational,searchLaboratoryStage,findOTByExactCode,listRegistrationResponsibles,addRegistrationResponsible,listUserProfiles,saveUserProfile} from './data.js';
 const $=s=>document.querySelector(s);const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sections=[['dashboard','▦','Centro de control'],['trace','⌕','Consulta y trazabilidad'],['ots','◈','Mediciones ambientales'],['laboratory','⚗','Ingreso de laboratorio'],['billing','▣','Facturación'],['supervision','◉','Supervisión de informes'],['clients','♧','Clientes'],['monitorings','◫','Catálogo de monitoreos'],['users','♙','Usuarios y permisos'],['migration','⇧','Importación histórica'],['diagnostics','◉','Diagnóstico Firebase']];
-const APP_VERSION='V1.0.1.33';
+const APP_VERSION='V1.0.1.34';
+// Resolución visual por ID: NO escribe en las OT ni altera sus nombres históricos.
+// Una lectura por cliente distinto (máximo 15 min en memoria); sin listeners adicionales.
+const catalogNameCache=new Map();
+async function displayCatalogNames(rows){
+ const ids=[...new Set(rows.map(r=>r.clientId).filter(Boolean))];
+ await Promise.all(ids.map(async id=>{
+  const old=catalogNameCache.get(id);
+  if(old && Date.now()-old.at<15*60*1000)return;
+  if(!navigator.onLine)return;
+  try{const snap=await getDoc(doc(db,'clients',id));catalogNameCache.set(id,{at:Date.now(),data:snap.exists()?snap.data():null});}
+  catch(err){console.warn('Nombre de catálogo no disponible; se conserva el de la OT',err)}
+ }));
+ return rows.map(r=>{
+  const client=catalogNameCache.get(r.clientId)?.data;
+  if(!client)return r;
+  const branch=(client.branches||[]).find(b=>b.id===r.branchId);
+  return {...r,clientName:client.name||r.clientName,branchName:branch?.name||r.branchName};
+ });
+}
+
 const BUILD_LABEL=APP_VERSION+' · RECTIFICACIÓN DE AUTORIZACIÓN';
 const labGlobal={active:false,rows:[],token:0,timer:null,truncated:false,cache:new Map()};
 const otGlobal={cache:null,loadedAt:0,fullCache:null,fullLoadedAt:0,scanPromise:null,active:false,loading:false,timer:null,token:0};
@@ -137,7 +157,7 @@ async function traceView(){
    }
    if(token!==request||state.view!=='trace')return;
    if(!rows.length){out.textContent='No se encontraron coincidencias en los años consultados. Verifique el código completo en Mediciones ambientales.';return}
-   const unique=[...new Map(rows.map(r=>[r.id,r])).values()];out.innerHTML=`<p class="muted">${unique.length} expediente(s) encontrado(s).</p><div class="trace-cards">${unique.map((r,i)=>`<article class="trace-result"><div><h3>${escape(r.code)}</h3><p>${escape(r.clientName||'Cliente no registrado')} · ${escape(r.branchName||'Sin sucursal')}</p><small>${escape(r.status||'Sin estado')} · ${escape(r.points??'—')} puntos</small></div><button class="btn" data-trace-open="${i}">Ver expediente →</button></article>`).join('')}</div>`;
+   const unique=await displayCatalogNames([...new Map(rows.map(r=>[r.id,r])).values()]);if(token!==request||state.view!=='trace')return;out.innerHTML=`<p class="muted">${unique.length} expediente(s) encontrado(s).</p><div class="trace-cards">${unique.map((r,i)=>`<article class="trace-result"><div><h3>${escape(r.code)}</h3><p>${escape(r.clientName||'Cliente no registrado')} · ${escape(r.branchName||'Sin sucursal')}</p><small>${escape(r.status||'Sin estado')} · ${escape(r.points??'—')} puntos</small></div><button class="btn" data-trace-open="${i}">Ver expediente →</button></article>`).join('')}</div>`;
    out.querySelectorAll('[data-trace-open]').forEach(btn=>btn.onclick=()=>openDetail(unique[Number(btn.dataset.traceOpen)]));
   }catch(e){if(token===request)out.textContent='No se pudo consultar Firebase: '+(e.message||e.code)}
  };
@@ -256,9 +276,9 @@ function billingView(){
  const paint=()=>{const rows=visible();$('#bill-rows').innerHTML=rows.length?rows.map(r=>{const d=draft(r);return `<tr data-bill-row="${escape(r.id)}"><td><input type="checkbox" data-bill-check="${escape(r.id)}" ${state.selectedBillingOTs.has(r.id)?'checked':''} aria-label="Seleccionar ${escape(r.code)}"></td><td><b>${escape(r.code)}</b><small class="ot-cell-secondary">${escape(r.status)}</small></td><td><b>${escape(r.clientName)}</b><small class="ot-cell-secondary">${escape(r.branchName)}</small></td><td>${escape(r.monitoring)}<small class="ot-cell-secondary">${escape(r.points)} punto(s)</small></td><td>${escape(r.laboratory?.receivedAt||r.sampledAt||'—')}</td><td><input data-bill-field="quote" maxlength="100" value="${escape(d.quote)}" placeholder="COT-0000"></td><td><input data-bill-field="invoice" maxlength="100" value="${escape(d.invoice)}" placeholder="Factura"></td><td><input data-bill-field="invoiceDate" type="date" value="${escape(d.invoiceDate)}"></td><td><input data-bill-field="subtotal" type="number" min="0" max="999999999" step="0.01" value="${escape(d.subtotal)}"></td><td><select data-bill-field="state">${['PENDIENTE','FACTURADO','FACTURA PARCIAL','EN ESPERA','NO FACTURAR'].map(x=>`<option ${d.state===x?'selected':''}>${x}</option>`).join('')}</select></td><td><textarea data-bill-field="note" maxlength="1000" rows="2" placeholder="Observaciones administrativas">${escape(d.note)}</textarea></td><td><button class="btn" data-bill-save="${escape(r.id)}">Guardar</button></td></tr>`}).join(''):'<tr><td colspan="12" class="empty">No hay registros coincidentes en esta página.</td></tr>';
  $('#bill-info').textContent=globalRows!==null?`Búsqueda global · ${rows.length} coincidencias${searchWarning?' · '+searchWarning:''}`:`Página ${p.index+1} · ${rows.length} visibles de ${loaded.length} consultadas · ${loading?'Consultando…':'Sincronizado con servidor'}`;$('#bill-prev').disabled=globalRows!==null||p.index===0;$('#bill-next').disabled=globalRows!==null||!p.hasMore;updateSelected();updateBillingDashboard();
  $('#bill-rows').querySelectorAll('[data-bill-row]').forEach(tr=>{const id=tr.dataset.billRow;tr.querySelectorAll('[data-bill-field]').forEach(el=>el.addEventListener('input',()=>{draft((globalRows||loaded).find(r=>r.id===id))[el.dataset.billField]=el.value;updateBillingDashboard()}));tr.querySelector('[data-bill-check]').onchange=e=>{if(e.target.checked){if(state.selectedBillingOTs.size>=20){e.target.checked=false;return toast('Máximo 20 OT por operación.',true)}state.selectedBillingOTs.set(id,(globalRows||loaded).find(r=>r.id===id).code)}else state.selectedBillingOTs.delete(id);updateSelected()};tr.querySelector('[data-bill-save]').onclick=async e=>{const b=e.currentTarget;b.disabled=true;try{const result=await saveBilling(id,draft((globalRows||loaded).find(r=>r.id===id)),state.user);state.billingDrafts.set(id,{...result});toast('Facturación guardada: '+(globalRows||loaded).find(r=>r.id===id).code)}catch(err){toast(err.message,true)}finally{b.disabled=false}}});};
- const load=async()=>{const token=++version;globalRows=null;loading=true;$('#bill-info').textContent='Consultando servidor…';try{const result=await fetchBillingPage(p.cursors[p.index]||null,p.size);if(token!==version||state.view!=='billing')return;loaded=result.rows;p.hasMore=result.more;p.lastCursor=result.cursor;for(const r of loaded)if(!state.billingDrafts.has(r.id))draft(r);loading=false;paint()}catch(e){loading=false;$('#bill-info').textContent='Error: '+e.message;toast(e.message,true)}};
+ const load=async()=>{const token=++version;globalRows=null;loading=true;$('#bill-info').textContent='Consultando servidor…';try{const result=await fetchBillingPage(p.cursors[p.index]||null,p.size);if(token!==version||state.view!=='billing')return;loaded=await displayCatalogNames(result.rows);if(token!==version||state.view!=='billing')return;p.hasMore=result.more;p.lastCursor=result.cursor;for(const r of loaded)if(!state.billingDrafts.has(r.id))draft(r);loading=false;paint()}catch(e){loading=false;$('#bill-info').textContent='Error: '+e.message;toast(e.message,true)}};
  $('#bill-size').onchange=e=>{p.size=Number(e.target.value);p.index=0;p.cursors=[null];load()};$('#bill-prev').onclick=()=>{if(p.index){p.index--;load()}};$('#bill-next').onclick=()=>{if(p.hasMore&&p.lastCursor){p.cursors[p.index+1]=p.lastCursor;p.index++;load()}};$('#bill-refresh').onclick=()=>{state.billingDrafts.clear();if($('#bill-search').value.trim().length>=3)runGlobal();else load()};
- const runGlobal=async()=>{const term=$('#bill-search').value.trim(),token=++version;if(term.length<3){globalRows=null;searchWarning='';if(term.length)$('#bill-info').textContent='Escriba al menos 3 caracteres para buscar globalmente.';await load();return}$('#bill-info').textContent='Buscando en índice global…';try{const result=await searchBillingGlobal(term,$('#bill-series').value);if(token!==version||state.view!=='billing')return;globalRows=result.rows;searchWarning=result.warning||'';for(const r of globalRows)draft(r);paint()}catch(e){if(token!==version)return;$('#bill-info').textContent='Error de búsqueda: '+e.message;toast(e.message,true)}};
+ const runGlobal=async()=>{const term=$('#bill-search').value.trim(),token=++version;if(term.length<3){globalRows=null;searchWarning='';if(term.length)$('#bill-info').textContent='Escriba al menos 3 caracteres para buscar globalmente.';await load();return}$('#bill-info').textContent='Buscando en índice global…';try{const result=await searchBillingGlobal(term,$('#bill-series').value);if(token!==version||state.view!=='billing')return;globalRows=await displayCatalogNames(result.rows);if(token!==version||state.view!=='billing')return;searchWarning=result.warning||'';for(const r of globalRows)draft(r);paint()}catch(e){if(token!==version)return;$('#bill-info').textContent='Error de búsqueda: '+e.message;toast(e.message,true)}};
  $('#bill-search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(runGlobal,400)});
  $('#bill-series').addEventListener('change',()=>{if($('#bill-search').value.trim().length>=3)runGlobal();else paint()});
  $('#bill-status').addEventListener('change',paint);
@@ -336,7 +356,7 @@ async function runLabGlobal(){
    result=await searchLaboratoryStage(state.labStage,'',series,100);
   }
   if(token!==labGlobal.token||state.view!=='laboratory')return;
-  labGlobal.rows=result.rows;labGlobal.truncated=result.truncated;renderLabGlobal();
+  labGlobal.rows=await displayCatalogNames(result.rows);if(token!==labGlobal.token||state.view!=='laboratory')return;labGlobal.truncated=result.truncated;renderLabGlobal();
   if(result.truncated)toast('Límite de 5000 OT alcanzado: el ordenamiento puede no incluir toda la etapa. Refine la búsqueda.',true);
  }catch(e){if(token===labGlobal.token){$('#page-status').textContent='Error de búsqueda';toast(e.message,true)}}
 }
@@ -362,12 +382,12 @@ function supervisionView(){
    if(isGlobal()){
     const data=await searchSupervisionGlobal($('#sup-search').value,{series:$('#sup-series').value,status:$('#sup-status').value,deliveryFrom:$('#sup-delivery-from').value,deliveryTo:$('#sup-delivery-to').value,authFrom:$('#sup-auth-from').value,authTo:$('#sup-auth-to').value});
     if(state.view!=='supervision'||generation!==token)return;
-    globalRows=data.rows;globalWarning=data.warning||'';p.hasMore=false;renderRows();
+    globalRows=await displayCatalogNames(data.rows);if(state.view!=='supervision'||generation!==token)return;globalWarning=data.warning||'';p.hasMore=false;renderRows();
    }else{
     globalRows=null;globalWarning='';const cursor=p.cursors[p.index]||null;
     const data=await fetchAdmittedPage(cursor,p.size);
     if(state.view!=='supervision'||generation!==token)return;
-    p.hasMore=data.more;p.lastCursor=data.cursor;raw=data.rows;renderRows();
+    p.hasMore=data.more;p.lastCursor=data.cursor;raw=await displayCatalogNames(data.rows);if(state.view!=='supervision'||generation!==token)return;renderRows();
    }
   }catch(err){if(generation===token){globalRows=null;raw=[];$('#sup-rows').innerHTML='<tr><td colspan="12" class="empty">Error de consulta. Revise los índices y la conexión.</td></tr>';$('#sup-info').textContent='Error: '+err.message;}}
  };
@@ -776,6 +796,7 @@ function attachPage(view){
   if(generation!==state.watchGeneration||state.view!==view)return;
   state.rows[view]=rows;p.lastCursor=cursor;p.hasMore=more;
   paintRows(view);
+  displayCatalogNames(rows).then(displayRows=>{if(generation!==state.watchGeneration||state.view!==view)return;state.rows[view]=displayRows;paintRows(view)}).catch(console.warn);
   if(view==='ots'&&!fromCache)refreshMeasurementCounts();// Los snapshots de página NO disparan agregaciones: se consulta solo al entrar, guardar o actualizar manualmente.
   const label=!navigator.onLine?'Sin conexión · datos no confirmados':fromCache?'Caché · esperando servidor':pending?'Cambios locales pendientes':'Sincronizado con servidor';state.serverVerified=!fromCache&&!pending&&navigator.onLine;
   syncLabel(label);
