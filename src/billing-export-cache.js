@@ -1,0 +1,6 @@
+// Caché temporal de exportación por usuario. No se comparte entre sesiones.
+const DB_NAME='psi-gases-export-v124', STORE='snapshots';
+function openDB(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,1);req.onupgradeneeded=()=>req.result.createObjectStore(STORE);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
+export async function readExportCache(uid){if(!uid||!globalThis.indexedDB)return null;const db=await openDB();try{return await new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readonly');const req=tx.objectStore(STORE).get(uid);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error)})}finally{db.close()}}
+export async function writeExportCache(uid,value){if(!uid||!globalThis.indexedDB)return;const db=await openDB();try{await new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(value,uid);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}finally{db.close()}}
+export async function clearExportCache(){if(!globalThis.indexedDB)return;await new Promise(resolve=>{const req=indexedDB.deleteDatabase(DB_NAME);req.onsuccess=resolve;req.onerror=resolve;req.onblocked=resolve})}

@@ -1,0 +1,463 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function signed(){return request.auth != null;}
+  function userPath(){return /databases/$(database)/documents/users/$(request.auth.uid);}
+  function active(){return signed() && exists(userPath()) && get(userPath()).data.active == true;}
+  function admin(){return active() && get(userPath()).data.role == 'ADMINISTRADOR';}
+  function editor(){return active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES'];}
+  function summaryPath(){return /databases/$(database)/documents/summaries/overview;}
+  function ready(){return exists(summaryPath()) && get(summaryPath()).data.initialized == true;}
+  function summaryIncrement(field,kind,id){
+   return ready() && getAfter(summaryPath()).data.initialized == true
+    && getAfter(summaryPath()).data.counts[field] == get(summaryPath()).data.counts[field] + 1
+    && getAfter(summaryPath()).data.lastMutation.type == kind
+    && getAfter(summaryPath()).data.lastMutation.id == id;
+  }
+  match /users/{uid} {
+   allow read: if active() && (request.auth.uid == uid || admin());
+   allow create,update: if admin() && request.resource.data.role in ['ADMINISTRADOR','OPERACIONES'] && request.resource.data.active is bool && (uid != request.auth.uid || (request.resource.data.role == 'ADMINISTRADOR' && request.resource.data.active == true));
+   allow delete: if false;
+  }
+  match /summaries/{id} {
+   allow read: if active();
+   allow create: if id == 'overview' && admin() && !exists(summaryPath())
+    && request.resource.data.initialized == true
+    && request.resource.data.counts.keys().hasAll(['ots','clients'])
+    && request.resource.data.counts.ots is int && request.resource.data.counts.ots >= 0
+    && request.resource.data.counts.clients is int && request.resource.data.counts.clients >= 0
+    && request.resource.data.lastMutation.type == 'INITIALIZE';
+   // La actualización del resumen requiere que el documento nuevo correspondiente
+   // exista en el mismo commit. Los registros de alta deben pasar su propia regla.
+   allow update: if active() && id == 'overview' && resource.data.initialized == true
+    && request.resource.data.initialized == true
+    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['counts','lastMutation','updatedAt'])
+    && (
+      (request.resource.data.lastMutation.type == 'OT_CREATE'
+       && editor()
+       && !exists(/databases/$(database)/documents/ots/$(request.resource.data.lastMutation.id))
+       && existsAfter(/databases/$(database)/documents/ots/$(request.resource.data.lastMutation.id))
+       && getAfter(/databases/$(database)/documents/ots/$(request.resource.data.lastMutation.id)).data.createdBy == request.auth.uid
+       && request.resource.data.counts.ots == resource.data.counts.ots + 1
+       && request.resource.data.counts.clients == resource.data.counts.clients)
+      ||
+      (request.resource.data.lastMutation.type == 'CLIENT_CREATE'
+       && editor()
+       && !exists(/databases/$(database)/documents/clients/$(request.resource.data.lastMutation.id))
+       && existsAfter(/databases/$(database)/documents/clients/$(request.resource.data.lastMutation.id))
+       && getAfter(/databases/$(database)/documents/clients/$(request.resource.data.lastMutation.id)).data.createdBy == request.auth.uid
+       && request.resource.data.counts.clients == resource.data.counts.clients + 1
+       && request.resource.data.counts.ots == resource.data.counts.ots)
+     );
+   allow delete: if false;
+  }
+  match /clientNameKeys/{key} {
+   allow read: if active();
+   allow create: if editor()
+    && request.resource.data.createdBy == request.auth.uid
+    && request.resource.data.clientId is string
+    && existsAfter(/databases/$(database)/documents/clients/$(request.resource.data.clientId))
+    && (getAfter(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.createdBy == request.auth.uid
+      || (getAfter(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.updatedBy == request.auth.uid
+      && getAfter(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.nameKey == request.resource.data.nameKey));
+   allow update, delete: if false;
+  }
+  match /clients/{id} {
+   allow read: if active();
+   allow create: if editor() && request.resource.data.createdBy == request.auth.uid
+     && summaryIncrement('clients','CLIENT_CREATE',id);
+   allow update: if editor();
+   allow delete: if false;
+  }
+  // V1.0.0.88: índice auxiliar de búsqueda en modo protegido.
+  // Los clientes autenticados y activos pueden consultar los índices.
+  // Escrituras bloqueadas hasta integrar validación de espejo en todos los flujos.
+  // Una migración administrativa mediante Admin SDK omite las reglas: operar
+  // únicamente con credenciales protegidas y tras respaldo/verificación.
+  match /otSearchIndex/{id} {
+   allow get, list: if active();
+   // Solo ADMINISTRADOR puede generar el índice, con campos y versión validados.
+   // La OT original debe existir y coincidir con código, serie, estado y versión.
+   allow create, update: if active()
+     && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+     && exists(/databases/$(database)/documents/ots/$(id))
+     && request.resource.data.keys().hasOnly(['otId','code','series','status','grams','sourceVersion','indexVersion'])
+     && request.resource.data.keys().hasAll(['otId','code','series','status','grams','sourceVersion','indexVersion'])
+     && request.resource.data.otId == id
+     && request.resource.data.indexVersion == 2
+     && request.resource.data.grams is list
+     && request.resource.data.grams.size() <= 1000
+     && request.resource.data.code == get(/databases/$(database)/documents/ots/$(id)).data.code
+     && request.resource.data.series == get(/databases/$(database)/documents/ots/$(id)).data.series
+     && request.resource.data.status == get(/databases/$(database)/documents/ots/$(id)).data.status
+     && request.resource.data.sourceVersion == get(/databases/$(database)/documents/ots/$(id)).data.version
+     && (!exists(/databases/$(database)/documents/otSearchIndex/$(id))
+         || request.resource.data.sourceVersion >= resource.data.sourceVersion);
+   allow delete: if false;
+  }
+  match /ots/{id} {
+   allow read: if active();
+   allow create: if editor() && request.resource.data.createdBy == request.auth.uid
+     && request.resource.data.version == 1
+     && request.resource.data.sampledAt == ''
+     && request.resource.data.receptionOTAt == null
+     && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+     && summaryIncrement('ots','OT_CREATE',id);
+   allow update: if active()
+     && request.resource.data.version == resource.data.version + 1
+     && request.resource.data.code == resource.data.code
+     && request.resource.data.createdAt == resource.data.createdAt
+     && request.resource.data.createdBy == resource.data.createdBy
+     && request.resource.data.updatedBy == request.auth.uid
+     && (
+       // Edición administrativa: únicamente los campos permitidos; sin cambios de estado.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['monitoring','monitoringId','clientName','clientId','branchName','branchId','type','points','workDate','registeredBy','observations','status','followUp','version','lastRequestId','updatedAt','updatedBy'])
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.series == resource.data.series
+        && request.resource.data.points is int && request.resource.data.points >= 1 && request.resource.data.points <= 100
+        && request.resource.data.observations is string && request.resource.data.observations.size() <= 1500
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.series == resource.data.series
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.name == request.resource.data.monitoring
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.type == request.resource.data.type
+        && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.name == request.resource.data.clientName
+        && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+        && request.resource.data.followUp == (request.resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA'))
+       ||
+       // V1.0.0.59: edición única con monitoreo RG/RR, cliente, fecha y auditoría.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['monitoring','monitoringId','type','clientId','clientName','branchId','branchName','points','workDate','registeredBy','observations','status','followUp','version','updatedAt','updatedBy'])
+        && request.resource.data.series == resource.data.series
+        && request.resource.data.points is int && request.resource.data.points >= 1 && request.resource.data.points <= 100
+        && request.resource.data.observations is string && request.resource.data.observations.size() <= 1500
+        && request.resource.data.workDate is string && (request.resource.data.workDate.size() == 0 || request.resource.data.workDate.size() == 10)
+        && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+        && request.resource.data.followUp == (request.resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA')
+        && exists(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId))
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.active != false
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.series == resource.data.series
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.name == request.resource.data.monitoring
+        && get(/databases/$(database)/documents/monitoringCatalog/$(request.resource.data.monitoringId)).data.type == request.resource.data.type
+        && exists(/databases/$(database)/documents/clients/$(request.resource.data.clientId))
+        && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.active != false
+        && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.name == request.resource.data.clientName)
+       ||
+       // V1.0.0.57: corrección histórica de cliente, sucursal y puntos; sin revalidar monitoreo antiguo.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clientId','clientName','branchId','branchName','points','version','updatedAt','updatedBy'])
+        && request.resource.data.points is int && request.resource.data.points >= 1 && request.resource.data.points <= 100
+        && exists(/databases/$(database)/documents/clients/$(request.resource.data.clientId))
+        && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.active != false
+        && get(/databases/$(database)/documents/clients/$(request.resource.data.clientId)).data.name == request.resource.data.clientName
+        && request.resource.data.series == resource.data.series)
+       ||
+       // V1.0.0.55: rectificación aislada de fecha de inicio (sin revalidar catálogos históricos).
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['workDate','status','followUp','version','updatedAt','updatedBy'])
+        && request.resource.data.workDate is string
+        && (request.resource.data.workDate.size() == 0 || request.resource.data.workDate.size() == 10)
+        && request.resource.data.status == (request.resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+        && request.resource.data.followUp == (request.resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA')
+        && request.resource.data.series == resource.data.series)
+       ||
+       // V1.0.0.55: rectificación de recepción prevista antes del ingreso oficial.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'EN_LABORATORIO'
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.series == resource.data.series
+        && request.resource.data.workDate == resource.data.workDate
+        && resource.data.workDate is string && resource.data.workDate.size() == 10
+        && request.resource.data.sampledAt == resource.data.sampledAt
+        && request.resource.data.receptionOTAt == resource.data.receptionOTAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['laboratory','version','updatedAt','updatedBy'])
+        && request.resource.data.laboratory.diff(resource.data.laboratory).affectedKeys().hasOnly(['proposedReceivedAt'])
+        && request.resource.data.laboratory.proposedReceivedAt is string
+        && request.resource.data.laboratory.proposedReceivedAt.size() == 10
+        && request.resource.data.laboratory.proposedReceivedAt >= resource.data.workDate)
+       ||
+       // Anulación lógica exclusiva de ADMINISTRADOR con auditoría atómica.
+       (admin() && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.status == 'ANULADA'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','voidReason','voidedAt','voidedBy','version','updatedAt','updatedBy'])
+        && request.resource.data.voidReason is string
+        && request.resource.data.voidReason.size() >= 10
+        && request.resource.data.voidReason.size() <= 500
+        && request.resource.data.voidedBy == request.auth.uid
+        && request.resource.data.voidedAt == request.time)
+       ||
+       // Envío individual/múltiple desde bandeja; validación de fechas y trazabilidad.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status in ['REGISTRADA','PROGRAMADA']
+        && request.resource.data.status == 'EN_LABORATORIO'
+        && request.resource.data.followUp == 'PENDIENTE_INGRESO'
+        && request.resource.data.workDate is string && request.resource.data.workDate.size() == 10
+        && request.resource.data.sampledAt == ''
+        && request.resource.data.laboratory.proposedReceivedAt is string
+        && request.resource.data.laboratory.proposedReceivedAt.size() == 10
+        && request.resource.data.laboratory.sentBy == request.auth.uid
+        && request.resource.data.receptionOTAt == null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','workDate','followUp','sampledAt','receptionOTAt','laboratory','version','updatedAt','updatedBy']))
+       ||
+       // Devolución a registro únicamente antes de recepción oficial.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'EN_LABORATORIO'
+        && resource.data.followUp == 'PENDIENTE_INGRESO'
+        && resource.data.receptionOTAt == null
+        && !('receivedAt' in resource.data.laboratory)
+        && !('receivedAtServer' in resource.data.laboratory)
+        && request.resource.data.status == (resource.data.workDate == '' ? 'REGISTRADA' : 'PROGRAMADA')
+        && request.resource.data.followUp == (resource.data.workDate == '' ? 'OT_POR_PROGRAMAR' : 'OT_PROGRAMADA')
+        && request.resource.data.laboratory == {}
+        && request.resource.data.version == resource.data.version + 1
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','laboratory','version','updatedAt','updatedBy']))
+       ||
+       // Confirmación oficial: solo OT enviada, con fecha de inicio.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'EN_LABORATORIO'
+        && resource.data.workDate is string && resource.data.workDate.size() == 10
+        && request.resource.data.status == 'INFORME_PENDIENTE'
+        && request.resource.data.followUp == 'OT_INGRESADA'
+        && request.resource.data.sampledAt is string && request.resource.data.sampledAt.size() == 10
+        && request.resource.data.receptionOTAt == request.time
+        && request.resource.data.laboratory.receivedAt == request.resource.data.sampledAt
+        && request.resource.data.laboratory.receivedBy == request.auth.uid
+        && request.resource.data.laboratory.analyst is string
+        && request.resource.data.laboratory.analyst.size() > 0
+        && request.resource.data.laboratory['service'] in ['INTERNO','SUBCONTRATADO']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','sampledAt','receptionOTAt','laboratory','version','updatedAt','updatedBy']))
+       ||
+       // Decisión de autorización: 1/4 liberan, 2/3 retienen sin fecha.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'POR_AUTORIZAR'
+        && resource.data.deliveryRealAt is string
+        && request.resource.data.authorization.state in ['1','2','3','4']
+        && request.resource.data.authorization.updatedBy == request.auth.uid
+        && ((request.resource.data.authorization.state in ['1','4']
+          && request.resource.data.status == 'AUTORIZADO'
+          && request.resource.data.followUp == 'AUTORIZADO_PENDIENTE_PORTAL'
+          && request.resource.data.authorizationAt is string
+          && request.resource.data.authorizationAt.size() == 10
+          && request.resource.data.authorization.authorizedAt == request.resource.data.authorizationAt)
+         || (request.resource.data.authorization.state in ['2','3']
+          && request.resource.data.status == 'POR_AUTORIZAR'
+          && request.resource.data.followUp == 'INFORME_RETENIDO'
+          && request.resource.data.authorizationAt == null
+          && request.resource.data.authorization.authorizedAt == null))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','authorization','authorizationAt','version','updatedAt','updatedBy']))
+       ||
+       // Rectificación de autorización: únicamente ADMINISTRADOR/CALIDAD, aún no publicada.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'AUTORIZADO'
+        && resource.data.authorization.state in ['1','4']
+        && resource.data.get('portalPublishedAt', null) == null
+        && request.resource.data.status == 'POR_AUTORIZAR'
+        && request.resource.data.followUp == 'INFORME_POR_AUTORIZAR'
+        && request.resource.data.authorization == null
+        && request.resource.data.authorizationAt == null
+        && request.resource.data.deliveryRealAt == resource.data.deliveryRealAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','authorization','authorizationAt','version','updatedAt','updatedBy']))
+       ||
+       // Publicación: exclusivamente informes autorizados (estado 1 o 4).
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'AUTORIZADO'
+        && resource.data.authorization.state in ['1','4']
+        && resource.data.authorizationAt is string
+        && resource.data.deliveryRealAt is string
+        && request.resource.data.status == 'PUBLICADO'
+        && request.resource.data.followUp == 'INFORME_ENVIADO_PORTAL'
+        && request.resource.data.portalPublishedAt is string
+        && request.resource.data.portalPublishedAt.size() == 10
+        && request.resource.data.portal.publishedAt == request.resource.data.portalPublishedAt
+        && request.resource.data.portal.publishedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','portalPublishedAt','portal','version','updatedAt','updatedBy']))
+       ||
+       // Rectificación auditada: únicamente ADMINISTRADOR/CALIDAD, sin decisión de autorización.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'POR_AUTORIZAR'
+        && resource.data.get('authorization', {}).get('state', null) == null
+        && resource.data.deliveryRealAt is string
+        && request.resource.data.status == 'INFORME_PENDIENTE'
+        && request.resource.data.followUp == 'OT_INGRESADA'
+        && request.resource.data.deliveryRealAt == null
+        && request.resource.data.report.deliveryRealAt == null
+        && request.resource.data.report.rectifiedBy == request.auth.uid
+        && request.resource.data.report.rectifiedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','deliveryRealAt','report','version','updatedAt','updatedBy']))
+       ||
+       // Registro de entrega real: informe pendiente -> por autorizar.
+       (get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+        && resource.data.status == 'INFORME_PENDIENTE'
+        && request.resource.data.status == 'POR_AUTORIZAR'
+        && request.resource.data.followUp == 'INFORME_POR_AUTORIZAR'
+        && request.resource.data.deliveryRealAt is string
+        && request.resource.data.deliveryRealAt.size() == 10
+        && request.resource.data.report.deliveryRealAt == request.resource.data.deliveryRealAt
+        && request.resource.data.report.deliveredBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','followUp','deliveryRealAt','report','version','updatedAt','updatedBy']))
+     );
+   allow delete: if false;
+  }
+  match /monitoringCatalog/{id} {
+   allow read: if active();
+   allow create: if editor() && request.resource.data.createdBy == request.auth.uid
+    && request.resource.data.name is string && request.resource.data.name.size() > 0
+    && request.resource.data.name.size() <= 160
+    && request.resource.data.nameKey is string
+    && request.resource.data.type in ['LABORAL','AMBIENTAL']
+    && request.resource.data.series in ['RR','RG']
+    && request.resource.data.active is bool;
+   allow update: if editor()
+    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['type','series','active','updatedBy','updatedAt'])
+    && request.resource.data.updatedBy == request.auth.uid
+    && request.resource.data.type in ['LABORAL','AMBIENTAL']
+    && request.resource.data.series in ['RR','RG']
+    && request.resource.data.active is bool;
+   allow delete: if false;
+  }
+  match /settings/registrationResponsibles {
+   allow read: if active();
+   allow create, update: if editor()
+    && request.resource.data.names is list
+    && request.resource.data.names.size() <= 150
+    && request.resource.data.updatedBy == request.auth.uid
+    && request.resource.data.keys().hasOnly(['names','updatedBy','updatedAt'])
+    && (!exists(/databases/$(database)/documents/settings/registrationResponsibles)
+        || request.resource.data.names.size() == resource.data.names.size() + 1);
+   allow delete: if false;
+  }
+  match /otBilling/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && exists(/databases/$(database)/documents/ots/$(id))
+    && get(/databases/$(database)/documents/ots/$(id)).data.status in ['INFORME_PENDIENTE','POR_AUTORIZAR','AUTORIZADO','PUBLICADO','FACTURADO']
+    && request.resource.data.otId == id
+    && request.resource.data.code == get(/databases/$(database)/documents/ots/$(id)).data.code
+    && request.resource.data.version == 1
+    && request.resource.data.createdBy == request.auth.uid
+    && request.resource.data.updatedBy == request.auth.uid
+    && request.resource.data.createdAt == request.time
+    && request.resource.data.updatedAt == request.time
+    && validBilling();
+   allow update: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quote','invoice','invoiceDate','subtotal','state','note','version','updatedBy','updatedAt'])
+    && request.resource.data.version == resource.data.version + 1
+    && request.resource.data.updatedBy == request.auth.uid
+    && request.resource.data.updatedAt == request.time
+    && validBilling();
+   allow delete: if false;
+  }
+  function validBilling() {
+   return request.resource.data.keys().hasOnly(['otId','code','quote','invoice','invoiceDate','subtotal','state','note','version','updatedBy','updatedAt','createdBy','createdAt'])
+    && request.resource.data.quote is string && request.resource.data.quote.size() <= 100
+    && request.resource.data.invoice is string && request.resource.data.invoice.size() <= 100
+    && request.resource.data.invoiceDate is string && (request.resource.data.invoiceDate.size() == 0 || request.resource.data.invoiceDate.size() == 10)
+    && request.resource.data.subtotal is number && request.resource.data.subtotal >= 0 && request.resource.data.subtotal <= 999999999
+    && request.resource.data.state in ['PENDIENTE','FACTURADO','FACTURA PARCIAL','EN ESPERA','NO FACTURAR']
+    && request.resource.data.note is string && request.resource.data.note.size() <= 1000
+    && (!(request.resource.data.state in ['FACTURADO','FACTURA PARCIAL']) || (request.resource.data.invoice.size() > 0 && request.resource.data.invoiceDate.size() == 10));
+  }
+  match /otBillingAudit/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.actorId == request.auth.uid
+    && request.resource.data.action in ['BILLING_SAVE','BILLING_BATCH']
+    && request.resource.data.createdAt == request.time;
+   allow update,delete: if false;
+  }
+  match /otLaboratoryAudit/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.actorId == request.auth.uid
+    && request.resource.data.action in ['SEND_LAB','SEND_LAB_BATCH','CONFIRM_LAB','CONFIRM_LAB_BATCH','RECTIFICAR_FECHA_INICIO','RECTIFICAR_RECEPCION_PROPUESTA','RECTIFICAR_DATOS_HISTORICOS','RETURN_TO_REGISTRATION','EDICION_CONTROLADA_OT']
+    && request.resource.data.createdAt == request.time;
+   allow update,delete: if false;
+  }
+  match /otPortalAudit/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.actorId == request.auth.uid
+    && request.resource.data.action in ['PORTAL_PUBLISH','PORTAL_PUBLISH_BATCH']
+    && request.resource.data.previousStatus == 'AUTORIZADO'
+    && request.resource.data.newStatus == 'PUBLICADO'
+    && request.resource.data.publishedAt is string
+    && request.resource.data.createdAt == request.time;
+   allow update,delete: if false;
+  }
+  match /otAuthorizationAudit/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.actorId == request.auth.uid
+    && request.resource.data.action in ['AUTH_STATE','AUTH_STATE_BATCH','AUTH_RETURN_TO_AUTHORIZATION']
+    && ((request.resource.data.action == 'AUTH_RETURN_TO_AUTHORIZATION'
+      && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+      && request.resource.data.previousStatus == 'AUTORIZADO'
+      && request.resource.data.newStatus == 'POR_AUTORIZAR'
+      && request.resource.data.previousAuthorizationState in ['1','4']
+      && request.resource.data.reason is string
+      && request.resource.data.reason.size() >= 10
+      && request.resource.data.reason.size() <= 500)
+     || (request.resource.data.action in ['AUTH_STATE','AUTH_STATE_BATCH']
+    && request.resource.data.previousStatus == 'POR_AUTORIZAR'
+    && request.resource.data.authorizationState in ['1','2','3','4']
+    && ((request.resource.data.authorizationState in ['1','4'] && request.resource.data.newStatus == 'AUTORIZADO' && request.resource.data.authorizationAt is string)
+      || (request.resource.data.authorizationState in ['2','3'] && request.resource.data.newStatus == 'POR_AUTORIZAR' && request.resource.data.authorizationAt == null))))
+    && request.resource.data.createdAt == request.time;
+   allow update,delete: if false;
+  }
+  match /otReportAudit/{id} {
+   allow read: if active();
+   allow create: if active() && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+    && request.resource.data.actorId == request.auth.uid
+    && request.resource.data.action in ['REPORT_DELIVER','REPORT_DELIVER_BATCH','REPORT_RETURN_TO_PENDING']
+    && ((request.resource.data.action in ['REPORT_DELIVER','REPORT_DELIVER_BATCH']
+      && request.resource.data.previousStatus == 'INFORME_PENDIENTE'
+      && request.resource.data.newStatus == 'POR_AUTORIZAR')
+      || (request.resource.data.action == 'REPORT_RETURN_TO_PENDING'
+      && get(userPath()).data.role in ['ADMINISTRADOR','OPERACIONES']
+      && request.resource.data.previousStatus == 'POR_AUTORIZAR'
+      && request.resource.data.newStatus == 'INFORME_PENDIENTE'
+      && request.resource.data.reason is string
+      && request.resource.data.reason.size() >= 10
+      && request.resource.data.reason.size() <= 500))
+    && request.resource.data.createdAt == request.time;
+   allow update,delete: if false;
+  }
+  match /otVoidAudit/{id} {
+   allow read: if admin();
+   allow create: if admin() && request.resource.data.actorId == request.auth.uid
+     && request.resource.data.createdAt == request.time
+     && request.resource.data.reason is string
+     && request.resource.data.reason.size() >= 10
+     && request.resource.data.reason.size() <= 500
+     && request.resource.data.keys().hasOnly(['otId','code','previousStatus','reason','actorId','createdAt']);
+   allow update,delete: if false;
+  }
+  match /otSequences/{id} {
+   allow read: if active();
+   allow create, update: if editor()
+    && request.resource.data.series in ['RR','RG']
+    && request.resource.data.year == 2026
+    && id == request.resource.data.series + '_2026'
+    && request.resource.data.updatedBy == request.auth.uid
+    && request.resource.data.last is int
+    && request.resource.data.last >= 1
+    && request.resource.data.last <= 9999
+    && (!exists(/databases/$(database)/documents/otSequences/$(id))
+        ? request.resource.data.last == 1
+        : request.resource.data.last == resource.data.last + 1)
+    && request.resource.data.keys().hasOnly(['series','year','last','updatedAt','updatedBy']);
+   allow delete: if false;
+  }
+  match /otCodes/{code} {
+   allow read: if active();
+   allow create: if editor() && !exists(/databases/$(database)/documents/otCodes/$(code));
+   allow update,delete: if false;
+  }
+  match /{document=**} {allow read,write: if false;}
+ }
+}

@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {normalizeSearch,searchGrams,indexPayload,matchesIndex} from './search-index-core.mjs';
+assert.equal(normalizeSearch('  ÁGUA   Guayaquil '),'AGUA GUAYAQUIL');
+const ot={code:'RG260087',clientName:'LABMAC S.A.',branchName:'Durán',monitoring:'Ruido Ambiental',status:'PROGRAMADA',series:'RG',version:3};
+const grams=searchGrams(ot);
+for(const term of ['RG2','260','LAB','ABM','DUR','RUI','AMB'])assert(grams.includes(term),`Falta ${term}`);
+const payload=indexPayload('ot-1',ot);
+assert(matchesIndex('ot-1',ot,payload));
+assert(!matchesIndex('ot-1',{...ot,clientName:'Otro cliente'},payload));
+assert(!matchesIndex('ot-1',{...ot,status:'LABORATORIO'},payload));
+assert(!matchesIndex('ot-1',{...ot,version:4},payload));
+console.log('Pruebas de normalización, fragmentos y detección de índices obsoletos: OK');
