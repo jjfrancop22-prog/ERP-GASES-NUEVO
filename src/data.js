@@ -631,6 +631,36 @@ export async function authorizeReportsBatch(ids,state,date,user){
 // Publicación al portal: cambio atómico, inmutable y auditable.
 function validatePortalDate(date){if(!/^\d{4}-\d{2}-\d{2}$/.test(String(date||''))||Number.isNaN(Date.parse(date+'T12:00:00')))throw Error('Indique una fecha de publicación válida.');}
 function eligibleForPortal(old){return old?.status==='AUTORIZADO'&&['1','4'].includes(String(old.authorization?.state))&&typeof old.authorizationAt==='string'&&old.authorizationAt.length===10&&typeof old.deliveryRealAt==='string'&&old.deliveryRealAt.length===10;}
+// Operación extraordinaria: lectura paginada bajo demanda, sin listeners.
+export async function previewExtraordinaryPortal(){
+ if(!navigator.onLine)throw Error('Se requiere conexión para revisar los informes.');
+ const eligible=[], excluded=[];let cursor=null;
+ do{
+  const clauses=[where('status','==','AUTORIZADO'),orderBy(documentId()),...(cursor?[startAfter(cursor)]:[]),limit(100)];
+  const snap=await getDocsFromServer(query(collection(db,'ots'),...clauses));
+  for(const d of snap.docs){const r=d.data();
+   if(eligibleForPortal(r))eligible.push({id:d.id,code:r.code,version:r.version,series:r.series});
+   else excluded.push({code:r.code||d.id,reason:'Autorización o fechas incompletas'});
+  }
+  cursor=snap.docs.length===100?snap.docs[snap.docs.length-1]:null;
+ }while(cursor);
+ return {eligible,excluded};
+}
+export async function publishExtraordinaryPortal(ids,date,user,onProgress){
+ if(!navigator.onLine)throw Error('Se requiere conexión.');validatePortalDate(date);
+ if(!Array.isArray(ids))throw Error('Selección inválida.');
+ const result={published:0,failed:[],skipped:0};
+ for(let i=0;i<ids.length;i+=20){
+  const group=ids.slice(i,i+20);
+  try{await publishPortalBatch(group,date,user);result.published+=group.length;}
+  catch(e){ // Aislar registros modificados desde la vista previa; continuar con el resto.
+   for(const id of group){try{await publishPortalBatch([id],date,user);result.published++;}
+    catch(err){result.failed.push({id,message:err.message});}}
+  }
+  if(onProgress)onProgress({...result,processed:Math.min(i+20,ids.length),total:ids.length});
+ }
+ return result;
+}
 export async function publishPortalOT(id,version,date,user){if(!navigator.onLine)throw Error('Sin conexión: publicación bloqueada.');validatePortalDate(date);await runTransaction(db,async t=>{const ref=doc(db,'ots',id),snap=await t.get(ref),old=snap.data();if(!eligibleForPortal(old)||old.version!==version)throw Error('OT modificada o no autorizada. Actualice la vista.');t.update(ref,{status:'PUBLICADO',followUp:'INFORME_ENVIADO_PORTAL',portalPublishedAt:date,portal:{publishedAt:date,publishedBy:user.uid,updatedAt:serverTimestamp()},version:old.version+1,updatedAt:serverTimestamp(),updatedBy:user.uid});t.set(doc(collection(db,'otPortalAudit')),{otId:id,code:old.code,action:'PORTAL_PUBLISH',previousStatus:'AUTORIZADO',newStatus:'PUBLICADO',publishedAt:date,actorId:user.uid,createdAt:serverTimestamp()})})}
 export async function publishPortalBatch(ids,date,user){if(!navigator.onLine)throw Error('Sin conexión: publicación bloqueada.');validatePortalDate(date);if(!Array.isArray(ids)||ids.length<1||ids.length>20||new Set(ids).size!==ids.length)throw Error('Seleccione de 1 a 20 OT diferentes.');await runTransaction(db,async t=>{const refs=ids.map(id=>doc(db,'ots',id)),snaps=[];for(const ref of refs)snaps.push(await t.get(ref));for(let i=0;i<snaps.length;i++)if(!eligibleForPortal(snaps[i].data()))throw Error('La OT '+(snaps[i].data()?.code||ids[i])+' ya cambió o no cumple autorización. Ninguna OT fue publicada.');snaps.forEach((snap,i)=>{const old=snap.data();t.update(refs[i],{status:'PUBLICADO',followUp:'INFORME_ENVIADO_PORTAL',portalPublishedAt:date,portal:{publishedAt:date,publishedBy:user.uid,updatedAt:serverTimestamp()},version:old.version+1,updatedAt:serverTimestamp(),updatedBy:user.uid});t.set(doc(collection(db,'otPortalAudit')),{otId:ids[i],code:old.code,action:'PORTAL_PUBLISH_BATCH',previousStatus:'AUTORIZADO',newStatus:'PUBLICADO',publishedAt:date,actorId:user.uid,createdAt:serverTimestamp()})})})}
 
@@ -766,7 +796,7 @@ export async function searchBillingGlobal(term,series='all'){
  let result,warning='';
  if(/^(RR|RG)\d{6}$/i.test(q))result=await findOTByExactCode(q);
  else {
-  result=await searchOTIndexOperational(q,{series,max:500});
+  result=await searchOTIndexOperational(q,{series,max:1500});
   if(result.unsupported||result.stale||result.limited){
    const prefix=await searchOTIndexedPrefixes(q,75);
    const merged=new Map([...result.rows,...prefix.rows].map(r=>[r.id,r]));
@@ -774,7 +804,7 @@ export async function searchBillingGlobal(term,series='all'){
    warning='Búsqueda parcial: el índice puede estar incompleto o desactualizado. Genere/actualice el índice de búsqueda para cobertura completa.';
   }
  }
- const eligible=result.rows.filter(r=>billable(r)&&(series==='all'||r.series===series));
+ const eligible=result.rows.filter(r=>billable(r)&&(series==='all'||(r.series||String(r.code||'').slice(0,2))===series));
  const rows=[];
  for(let i=0;i<eligible.length;i+=20){
   const chunk=eligible.slice(i,i+20);

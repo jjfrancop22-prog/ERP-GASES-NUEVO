@@ -9,19 +9,18 @@ export async function searchIndexedOT(db,term,{status=null,series='all',max=500,
  if(words.length!==1||words[0].length<3)return {rows:[],unsupported:true,reads:0,limited:false};
  const gram=words[0].slice(0,3);
  const hits=[];let cursor=null,reads=0,limited=false;
- // El límite se aplica a la serie solicitada, no a los primeros documentos
- // globales del índice (que pueden pertenecer únicamente a RG).
- let scanned=0;const scanCap=10000;
  do {
-  const clauses=[where('grams','array-contains',gram),limit(Math.min(chunk,scanCap-scanned))];
+  const clauses=[where('grams','array-contains',gram)];
+  // Filtrar RR/RG EN FIRESTORE antes del límite global, no después.
+  if(series!=='all')clauses.push(where('series','==',series));
+  clauses.push(limit(Math.min(chunk,max+1-hits.length)));
   if(cursor)clauses.push(startAfter(cursor));
   const snap=await getDocs(query(collection(db,'otSearchIndex'),...clauses));
-  reads+=snap.size;scanned+=snap.size;
-  hits.push(...snap.docs.filter(d=>series==='all'||String(d.data().series||d.data().code||'').toUpperCase().startsWith(series)));
+  reads+=snap.size;
+  hits.push(...snap.docs);
   cursor=snap.docs.at(-1);
-  if(snap.size<Math.min(chunk,scanCap-(scanned-snap.size)))break;
+  if(snap.size<Math.min(chunk,max+1-(hits.length-snap.size)))break;
   if(hits.length>max){limited=true;break}
-  if(scanned>=scanCap){limited=true;break}
  }while(cursor);
  if(hits.length>max)limited=true;
  const candidates=hits.slice(0,max);
