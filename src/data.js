@@ -783,8 +783,27 @@ export async function exportBillingHistory(mode='all',onProgress=()=>{}){
  const codeNumber=r=>{const m=String(r.code||'').match(/(\d+)$/);return m?Number(m[1]):Number.MAX_SAFE_INTEGER};
  return rows.sort((a,b)=>seriesRank(a)-seriesRank(b)||validDate(a).localeCompare(validDate(b))||codeNumber(a)-codeNumber(b)||String(a.code||'').localeCompare(String(b.code||''),'es',{numeric:true}));
 }
-export async function fetchBillingPage(cursor=null,size=10){
- const result=await fetchAdmittedPage(cursor,size);
+export async function fetchBillingPage(cursor=null,size=10,series='all'){
+ // RR/RG: consultar por prefijo de código EN EL SERVIDOR antes de paginar.
+ // Evita que una página compuesta por RG parezca vacía al seleccionar RR.
+ let result;
+ if(series==='all')result=await fetchAdmittedPage(cursor,size);
+ else {
+  const rows=[];let next=cursor,exhausted=false;
+  while(rows.length<size && !exhausted){
+   const requested=Math.max(1,size-rows.length);
+   const constraints=[orderBy('code'),startAt(series),endAt(series+'\uf8ff'),limit(requested)];
+   if(next)constraints.push(startAfter(next));
+   const snap=await getDocs(query(collection(db,'ots'),...constraints));
+   for(const d of snap.docs){const r={id:d.id,...d.data()};if(billable(r))rows.push(r)}
+   next=snap.docs.at(-1)||next;
+   exhausted=snap.size<requested;
+  }
+  // Cursor por último documento escaneado: los resultados sobrantes deben conservarse.
+  // Para evitar saltos, usamos lotes de tamaño 1 en el tramo final cuando quedan pocos espacios.
+  result={rows:rows.slice(0,size),cursor:next,more:!exhausted};
+ }
+
  const refs=result.rows.map(r=>doc(db,'otBilling',r.id));
  const bills=await Promise.all(refs.map(ref=>getDocFromServer(ref)));
  return {...result,rows:result.rows.map((r,i)=>({...r,billing:bills[i].exists()?bills[i].data():null}))};
@@ -804,7 +823,7 @@ export async function searchBillingGlobal(term,series='all'){
    warning='La búsqueda parcial puede tener cobertura incompleta. Si falta una OT RR/RG, un administrador debe ejecutar «Generar índice de búsqueda» para reconstruir el índice auxiliar; las OT originales no se modifican.';
   }
  }
- const eligible=result.rows.filter(r=>billable(r)&&(series==='all'||(r.series||String(r.code||'').slice(0,2))===series));
+ const eligible=result.rows.filter(r=>billable(r)&&(series==='all'||String(r.code||'').toUpperCase().startsWith(series)));
  const rows=[];
  for(let i=0;i<eligible.length;i+=20){
   const chunk=eligible.slice(i,i+20);
