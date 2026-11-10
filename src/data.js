@@ -797,11 +797,11 @@ export async function searchBillingGlobal(term,series='all'){
  if(/^(RR|RG)\d{6}$/i.test(q))result=await findOTByExactCode(q);
  else {
   result=await searchOTIndexOperational(q,{series,max:1500});
-  if(result.unsupported||result.stale||result.limited){
+  if(result.unsupported||result.stale||result.limited||!result.rows.length){
    const prefix=await searchOTIndexedPrefixes(q,75);
    const merged=new Map([...result.rows,...prefix.rows].map(r=>[r.id,r]));
    result={...result,rows:[...merged.values()]};
-   warning='Búsqueda parcial: el índice puede estar incompleto o desactualizado. Genere/actualice el índice de búsqueda para cobertura completa.';
+   warning='La búsqueda parcial puede tener cobertura incompleta. Si falta una OT RR/RG, un administrador debe ejecutar «Generar índice de búsqueda» para reconstruir el índice auxiliar; las OT originales no se modifican.';
   }
  }
  const eligible=result.rows.filter(r=>billable(r)&&(series==='all'||(r.series||String(r.code||'').slice(0,2))===series));
@@ -812,6 +812,7 @@ export async function searchBillingGlobal(term,series='all'){
   rows.push(...chunk.map((r,j)=>({...r,billing:bills[j].exists()?bills[j].data():null})));
  }
  rows.sort((a,b)=>String(b.code).localeCompare(String(a.code)));
+ if(!rows.length && !warning)warning='Sin coincidencias en el índice. Si conoce una OT que debería aparecer, solicite reconstruir el índice auxiliar desde «Generar índice de búsqueda».';
  return {rows,warning,limited:!!result.limited};
 }
 

@@ -33,7 +33,7 @@ export async function searchIndexedOT(db,term,{status=null,series='all',max=500,
    const idx=candidates[i+j].data();
    if(!s.exists()){stale=true;return}
    const r={id:s.id,...s.data()};
-   if(idx.sourceVersion!==r.version){stale=true;return}
+   if(Number(idx.sourceVersion||0)!==Number(r.version||0)){stale=true}
    if((!status||r.status===status)&&(series==='all'||(r.series||String(r.code||'').slice(0,2))===series)&&
       ['code','clientName','branchName','monitoring'].some(field=>normalizeSearch(r[field]).includes(needle)))rows.push(r);
   });
