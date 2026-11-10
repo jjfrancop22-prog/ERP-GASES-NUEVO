@@ -275,7 +275,7 @@ function billingView(){
  const p=pagingState('billing');let loaded=[],version=0,loading=false,globalRows=null,searchTimer=null,searchWarning='';$('#bill-size').value=p.size;
  const draft=(r)=>{if(!state.billingDrafts.has(r.id))state.billingDrafts.set(r.id,{quote:r.billing?.quote||'',invoice:r.billing?.invoice||'',invoiceDate:r.billing?.invoiceDate||'',subtotal:r.billing?.subtotal??'',state:r.billing?.state||'PENDIENTE',note:r.billing?.note||'',version:r.billing?.version||0});return state.billingDrafts.get(r.id)};
  const eligible=r=>r.status!=='ANULADA'&&!['REGISTRADA','PROGRAMADA','EN_LABORATORIO'].includes(r.status);
- const visible=()=>{const term=$('#bill-search').value.toLocaleLowerCase('es'),series=$('#bill-series').value,st=$('#bill-status').value;return (globalRows||loaded).filter(r=>eligible(r)&&(series==='all'||r.series===series)&&(st==='all'||draft(r).state===st)&&[r.code,r.clientName,r.branchName,r.monitoring,draft(r).quote,draft(r).invoice].join(' ').toLocaleLowerCase('es').includes(term))};
+ const visible=()=>{const term=$('#bill-search').value.toLocaleLowerCase('es'),series=$('#bill-series').value,st=$('#bill-status').value;return (globalRows||loaded).filter(r=>eligible(r)&&(series==='all'||String(r.series||r.code||'').toUpperCase().startsWith(series))&&(st==='all'||draft(r).state===st)&&[r.code,r.clientName,r.branchName,r.monitoring,draft(r).quote,draft(r).invoice].join(' ').toLocaleLowerCase('es').includes(term))};
  const updateSelected=()=>{$('#bill-selected').textContent=state.selectedBillingOTs.size+' seleccionadas'};
  const updateBillingDashboard=()=>{
   const eligibleRows=(globalRows||loaded).filter(eligible), filteredRows=visible();
