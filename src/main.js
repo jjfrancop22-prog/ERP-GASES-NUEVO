@@ -9,7 +9,7 @@ import {db} from './firebase.js';
 import {profile,page,createOT,addClient,updateClient,updateOT,saveOTControlled,correctOTHistoricalDetails,correctOTWorkDate,correctPendingReceptionDate,voidOT,sendLaboratoryOT,sendLaboratoryBatch,receiveLaboratory,receiveLaboratoryBatch,returnPendingOTs,deliverReport,deliverReportsBatch,returnReportToPending,returnAuthorizedToAuthorization,authorizeReport,authorizeReportsBatch,publishPortalOT,publishPortalBatch,previewExtraordinaryPortal,publishExtraordinaryPortal,fetchBillingPage,searchBillingGlobal,exportBillingHistory,fetchAdmittedPage,searchSupervisionGlobal,saveBilling,saveBillingBatch,fetchOT,count,supervisionCounts,watchPage,watchCounters,countOTStage,countMeasurementOTs,operationMenuCounts,verifyServer,initializeCounters,checkCounterConsistency,searchClients,clientCatalogPage,addBranch,importCatalogClient,lookupCatalogName,searchMonitorings,saveMonitoring,listMonitorings,exportAllMonitorings,nextOTSequence,scanOTHistory,searchOTIndexedPrefixes,searchOTIndexOperational,searchLaboratoryStage,findOTByExactCode,listRegistrationResponsibles,addRegistrationResponsible,listUserProfiles,saveUserProfile} from './data.js';
 const $=s=>document.querySelector(s);const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sections=[['dashboard','▦','Centro de control'],['trace','⌕','Consulta y trazabilidad'],['ots','◈','Mediciones ambientales'],['laboratory','⚗','Ingreso de laboratorio'],['billing','▣','Facturación'],['supervision','◉','Supervisión de informes'],['clients','♧','Clientes'],['monitorings','◫','Catálogo de monitoreos'],['users','♙','Usuarios y permisos'],['migration','⇧','Importación histórica'],['diagnostics','◉','Diagnóstico Firebase']];
-const APP_VERSION='V1.0.1.43';
+const APP_VERSION='V1.0.1.44';
 // Resolución visual por ID: NO escribe en las OT ni altera sus nombres históricos.
 // Una lectura por cliente distinto (máximo 15 min en memoria); sin listeners adicionales.
 const catalogNameCache=new Map();
@@ -358,8 +358,8 @@ async function runLabGlobal(){
   if(term && !exact){
    const indexed=await searchOTIndexOperational(term,{status:state.labStage,series,max:500});
    if(indexed.unsupported||indexed.limited||indexed.stale){
-    labGlobal.rows=[];labGlobal.truncated=false;renderLabGlobal();
-    $('#page-status').textContent='Consulta no concluyente: refine la búsqueda o repare el índice.';return;
+    labGlobal.rows=indexed.rows||[];labGlobal.truncated=false;renderLabGlobal();
+    $('#page-status').textContent='Resultados verificados, pero índice incompleto: repare el índice.';return;
    }
    result={rows:indexed.rows,truncated:false};
   }else if(exact){
@@ -584,10 +584,10 @@ async function runGlobalOTFilter(force=false){
    const indexed=await searchOTIndexOperational(term);
    if(token!==otGlobal.token||state.view!=='ots'||!otGlobal.active)return;
    if(indexed.unsupported||indexed.limited||indexed.stale){
-    otGlobal.cache=[];renderGlobalOTPage();
+    otGlobal.cache=indexed.rows||[];renderGlobalOTPage();
     const reason=indexed.limited?'Demasiadas coincidencias (límite del índice).':indexed.stale?'Se detectaron índices desactualizados.':'La consulta no es compatible con el índice.';
-    $('#page-status').textContent=reason+' Refine la búsqueda o solicite reconstruir los índices.';
-    $('#ot-filter-scope').textContent='Resultados no concluyentes · sin escaneo masivo';
+    $('#page-status').textContent=(indexed.rows?.length?indexed.rows.length+' coincidencia(s) verificadas. ':'')+reason+' Los resultados podrían ser parciales; repare los índices.';
+    $('#ot-filter-scope').textContent='Resultados verificados'+(indexed.recovered?' · recuperación directa por código':'')+' · cobertura del índice incompleta';
     return;
    }
    otGlobal.cache=indexed.rows;renderGlobalOTPage();

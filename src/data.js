@@ -977,7 +977,30 @@ export async function searchLaboratoryStage(status,term,series='all',max=5000){
 
 // V1.0.0.97: búsqueda indexada con control explícito de cobertura y desactualización.
 export async function searchOTIndexOperational(term,options={}){
- return searchIndexedOT(db,term,{max:500,...options});
+ const needle=String(term||'').trim().toUpperCase();
+ const series=options.series||'all';
+ // Correlativos 3-4 dígitos: consulta puntual al índice nativo code de Firestore.
+ // Recupera OT históricas aunque otSearchIndex falte o tenga sourceVersion antigua.
+ // No recorre la colección ots ni depende de la página visible.
+ let recovered=[];let fallbackReads=0;
+ if(/^\d{3,4}$/.test(needle)){
+  const suffix=needle.padStart(4,'0');
+  const prefixes=series==='all'?['RG','RR']:[series];
+  const years=[...new Set([new Date().getFullYear(),2026,2027,2025,2024,2023,2022,2021,2020])];
+  const codes=years.flatMap(year=>prefixes.map(prefix=>prefix+String(year).slice(-2)+suffix));
+  for(let i=0;i<codes.length;i+=8){
+   const checks=await Promise.all(codes.slice(i,i+8).map(code=>findOTByExactCode(code)));
+   fallbackReads+=checks.length;
+   recovered.push(...checks.flatMap(result=>result.rows));
+  }
+ }
+ let indexed;
+ try{indexed=await searchIndexedOT(db,term,{max:500,...options})}
+ catch(error){if(!recovered.length)throw error;indexed={rows:[],stale:true,limited:false,unsupported:false,reads:0,indexError:true}}
+ const status=options.status;
+ const matches=r=>(!status||r.status===status)&&(series==='all'||(r.series||String(r.code||'').slice(0,2))===series);
+ const rows=[...new Map([...indexed.rows,...recovered.filter(matches)].map(r=>[r.id,r])).values()];
+ return {...indexed,rows,reads:indexed.reads+fallbackReads,recovered:recovered.length,partial:!!(indexed.stale||indexed.limited||indexed.indexError)};
 }
 
 // V1.0.0.94: opt-in diagnostic. No production replacement without verified coverage.
